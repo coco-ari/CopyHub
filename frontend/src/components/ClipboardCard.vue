@@ -33,8 +33,8 @@ const copyToClipboard = async () => {
         {{ content }}
       </p>
 
-      <!-- 操作按钮 -->
-      <div class="flex items-center gap-2 opacity-0 group-hover/card:opacity-100 transition-opacity">
+      <!-- 操作按钮 - 手机端始终显示，桌面端hover显示 -->
+      <div class="flex items-center gap-2 opacity-100 md:opacity-0 md:group-hover/card:opacity-100 transition-opacity">
         <!-- 复制按钮 -->
         <button
           @click="copyToClipboard"

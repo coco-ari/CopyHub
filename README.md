@@ -15,15 +15,42 @@ CopyHub 是一个简洁高效的跨设备文本共享平台。打开网页即可
 
 ## 技术栈
 
-- **前端**: Vue.js
-- **后端**: Python
-- **部署**: Docker
+- **前端**: Vue 3 + Vite + Tailwind CSS
+- **后端**: FastAPI + SQLite
+- **部署**: Docker + Nginx
+
+## 项目结构
+
+```
+CopyHub/
+├── frontend/          # Vue 3 前端项目
+├── backend/           # FastAPI 后端项目
+├── docker-compose.yml # Docker 编排文件
+└── data/              # SQLite 数据持久化目录
+```
 
 ## 快速开始
 
+### Docker 一键部署
+
 ```bash
-# 使用 Docker 一键部署
 docker-compose up -d
+```
+
+访问 http://localhost 即可使用。
+
+### 本地开发
+
+```bash
+# 后端
+cd backend
+pip install -r requirements.txt
+uvicorn main:app --reload --port 8000
+
+# 前端
+cd frontend
+npm install
+npm run dev
 ```
 
 ## License

@@ -3,6 +3,8 @@ import { ref, computed, onMounted } from 'vue'
 import ClipboardCard from './components/ClipboardCard.vue'
 import InputBox from './components/InputBox.vue'
 
+const API_URL = '/api'
+
 // 主题切换
 const isDark = ref(false)
 
@@ -19,29 +21,54 @@ onMounted(() => {
     isDark.value = true
     document.documentElement.classList.add('dark')
   }
+  // 加载数据
+  fetchItems()
 })
 
 // 剪贴板数据
-const clipboardItems = ref([
-  { id: 1, content: '这是第一条剪贴板内容，可以是一段文字或者链接', createdAt: new Date(Date.now() - 2 * 60 * 1000) },
-  { id: 2, content: '这是第二条内容，https://example.com', createdAt: new Date(Date.now() - 3 * 60 * 1000) },
-  { id: 3, content: '第三条内容，稍早一些添加的', createdAt: new Date(Date.now() - 12 * 60 * 1000) },
-  { id: 4, content: '昨天的内容，测试时间显示', createdAt: new Date(Date.now() - 24 * 60 * 60 * 1000) },
-])
+const clipboardItems = ref([])
+
+// 获取数据
+const fetchItems = async () => {
+  try {
+    const res = await fetch(`${API_URL}/items`)
+    const data = await res.json()
+    clipboardItems.value = data.map(item => ({
+      ...item,
+      createdAt: new Date(item.created_at)
+    }))
+  } catch (err) {
+    console.error('获取数据失败:', err)
+  }
+}
 
 // 添加新内容
-const addContent = (content) => {
+const addContent = async (content) => {
   if (!content.trim()) return
-  clipboardItems.value.unshift({
-    id: Date.now(),
-    content: content.trim(),
-    createdAt: new Date()
-  })
+  try {
+    const res = await fetch(`${API_URL}/items`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: content.trim() })
+    })
+    if (res.ok) {
+      await fetchItems()
+    }
+  } catch (err) {
+    console.error('添加失败:', err)
+  }
 }
 
 // 删除内容
-const deleteItem = (id) => {
-  clipboardItems.value = clipboardItems.value.filter(item => item.id !== id)
+const deleteItem = async (id) => {
+  try {
+    const res = await fetch(`${API_URL}/items/${id}`, { method: 'DELETE' })
+    if (res.ok) {
+      clipboardItems.value = clipboardItems.value.filter(item => item.id !== id)
+    }
+  } catch (err) {
+    console.error('删除失败:', err)
+  }
 }
 
 // 时间分组（5分钟阈值）
@@ -51,7 +78,6 @@ const groupedItems = computed(() => {
 
   clipboardItems.value.forEach((item, index) => {
     const prevItem = clipboardItems.value[index - 1]
-    // prevItem 时间更近，item 时间更远，所以用 prevItem - item
     const timeDiff = prevItem ? prevItem.createdAt - item.createdAt : Infinity
 
     if (timeDiff > threshold) {
