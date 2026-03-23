@@ -101,6 +101,8 @@ const fetchItems = async () => {
       ...item,
       createdAt: new Date(item.created_at)
     }))
+    // 滚动到最新消息
+    scrollToBottom()
   } catch (err) {
     console.error('获取数据失败:', err)
   }
