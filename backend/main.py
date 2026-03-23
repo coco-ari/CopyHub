@@ -1,11 +1,11 @@
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from datetime import datetime
-from typing import Optional
-import os
-import json
+from datetime import datetime, timezone, timedelta
 import asyncio
+
+# 使用 UTC+8 时区
+TZ_SHANGHAI = timezone(timedelta(hours=8))
 
 from database import SessionLocal, engine, Base
 from models import ClipboardItem
@@ -51,16 +51,6 @@ class ItemCreate(BaseModel):
     content: str
 
 
-# 响应模型
-class ItemResponse(BaseModel):
-    id: int
-    content: str
-    created_at: datetime
-
-    class Config:
-        from_attributes = True
-
-
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket 连接端点"""
@@ -75,18 +65,27 @@ async def websocket_endpoint(websocket: WebSocket):
         manager.disconnect(websocket)
 
 
-@app.get("/api/items", response_model=list[ItemResponse])
+def to_local_time(dt: datetime) -> str:
+    """将 naive datetime 转换为 UTC+8 时区的 ISO 格式字符串"""
+    return dt.replace(tzinfo=timezone.utc).astimezone(TZ_SHANGHAI).isoformat()
+
+
+@app.get("/api/items")
 def get_items():
     """获取所有剪贴板内容，按时间倒序"""
     db = SessionLocal()
     try:
         items = db.query(ClipboardItem).order_by(ClipboardItem.created_at.desc()).all()
-        return items
+        return [{
+            "id": item.id,
+            "content": item.content,
+            "created_at": to_local_time(item.created_at)
+        } for item in items]
     finally:
         db.close()
 
 
-@app.post("/api/items", response_model=ItemResponse)
+@app.post("/api/items")
 async def create_item(item: ItemCreate):
     """新增剪贴板内容"""
     if not item.content or not item.content.strip():
@@ -99,17 +98,23 @@ async def create_item(item: ItemCreate):
         db.commit()
         db.refresh(new_item)
 
+        created_at_str = to_local_time(new_item.created_at)
+
         # 广播新消息给所有客户端
         await manager.broadcast({
             "type": "create",
             "data": {
                 "id": new_item.id,
                 "content": new_item.content,
-                "created_at": new_item.created_at.isoformat()
+                "created_at": created_at_str
             }
         })
 
-        return new_item
+        return {
+            "id": new_item.id,
+            "content": new_item.content,
+            "created_at": created_at_str
+        }
     finally:
         db.close()
 

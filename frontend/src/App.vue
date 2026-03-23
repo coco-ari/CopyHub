@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import ClipboardCard from './components/ClipboardCard.vue'
 import InputBox from './components/InputBox.vue'
 
@@ -44,10 +44,21 @@ const handleWebSocketMessage = (message) => {
       createdAt: new Date(message.data.created_at)
     }
     clipboardItems.value.push(newItem)
+    // 滚动到底部
+    scrollToBottom()
   } else if (message.type === 'delete') {
     // 删除消息
     clipboardItems.value = clipboardItems.value.filter(item => item.id !== message.data.id)
   }
+}
+
+const scrollToBottom = () => {
+  nextTick(() => {
+    window.scrollTo({
+      top: document.body.scrollHeight,
+      behavior: 'smooth'
+    })
+  })
 }
 
 // 主题切换
