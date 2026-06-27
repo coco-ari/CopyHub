@@ -1,8 +1,10 @@
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+import asyncio
+import os
+from datetime import datetime, timezone, timedelta
+
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from datetime import datetime, timezone, timedelta
-import asyncio
 
 # 使用 UTC+8 时区
 TZ_SHANGHAI = timezone(timedelta(hours=8))
@@ -15,6 +17,12 @@ Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="CopyHub API", version="1.0.0")
 
+MAX_CONTENT_LENGTH = int(os.getenv("MAX_CONTENT_LENGTH", "10000"))
+DEFAULT_ITEMS_LIMIT = int(os.getenv("DEFAULT_ITEMS_LIMIT", "100"))
+MAX_ITEMS_LIMIT = int(os.getenv("MAX_ITEMS_LIMIT", "200"))
+RETENTION_ITEMS = int(os.getenv("RETENTION_ITEMS", "500"))
+BROADCAST_TIMEOUT_SECONDS = float(os.getenv("BROADCAST_TIMEOUT_SECONDS", "3"))
+
 # WebSocket 连接管理
 class ConnectionManager:
     def __init__(self):
@@ -25,14 +33,30 @@ class ConnectionManager:
         self.active_connections.append(websocket)
 
     def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def _send(self, connection: WebSocket, message: dict):
+        try:
+            await asyncio.wait_for(
+                connection.send_json(message),
+                timeout=BROADCAST_TIMEOUT_SECONDS,
+            )
+            return connection, True
+        except Exception:
+            return connection, False
 
     async def broadcast(self, message: dict):
-        for connection in self.active_connections:
-            try:
-                await connection.send_json(message)
-            except:
-                pass
+        if not self.active_connections:
+            return
+
+        results = await asyncio.gather(
+            *(self._send(connection, message) for connection in list(self.active_connections))
+        )
+
+        for connection, ok in results:
+            if not ok:
+                self.disconnect(connection)
 
 manager = ConnectionManager()
 
@@ -63,6 +87,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 await websocket.send_text("pong")
     except WebSocketDisconnect:
         manager.disconnect(websocket)
+    except Exception:
+        manager.disconnect(websocket)
 
 
 def to_local_time(dt: datetime) -> str:
@@ -70,17 +96,64 @@ def to_local_time(dt: datetime) -> str:
     return dt.replace(tzinfo=timezone.utc).astimezone(TZ_SHANGHAI).isoformat()
 
 
+def serialize_item(item: ClipboardItem) -> dict:
+    return {
+        "id": item.id,
+        "content": item.content,
+        "created_at": to_local_time(item.created_at),
+    }
+
+
+def normalize_content(content: str) -> str:
+    if not content or not content.strip():
+        raise HTTPException(status_code=400, detail="内容不能为空")
+
+    normalized = content.strip()
+    if len(normalized) > MAX_CONTENT_LENGTH:
+        raise HTTPException(
+            status_code=413,
+            detail=f"内容不能超过 {MAX_CONTENT_LENGTH} 个字符",
+        )
+
+    return normalized
+
+
+def prune_old_items(db) -> list[int]:
+    if RETENTION_ITEMS <= 0:
+        return []
+
+    stale_items = (
+        db.query(ClipboardItem.id)
+        .order_by(ClipboardItem.created_at.desc(), ClipboardItem.id.desc())
+        .offset(RETENTION_ITEMS)
+        .all()
+    )
+    stale_ids = [item_id for (item_id,) in stale_items]
+    if stale_ids:
+        db.query(ClipboardItem).filter(ClipboardItem.id.in_(stale_ids)).delete(
+            synchronize_session=False
+        )
+        db.commit()
+
+    return stale_ids
+
+
 @app.get("/api/items")
-def get_items():
-    """获取所有剪贴板内容，按时间倒序"""
+def get_items(
+    limit: int = Query(DEFAULT_ITEMS_LIMIT, ge=1, le=MAX_ITEMS_LIMIT),
+    offset: int = Query(0, ge=0),
+):
+    """获取剪贴板内容，按时间倒序分页"""
     db = SessionLocal()
     try:
-        items = db.query(ClipboardItem).order_by(ClipboardItem.created_at.desc()).all()
-        return [{
-            "id": item.id,
-            "content": item.content,
-            "created_at": to_local_time(item.created_at)
-        } for item in items]
+        items = (
+            db.query(ClipboardItem)
+            .order_by(ClipboardItem.created_at.desc(), ClipboardItem.id.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+        return [serialize_item(item) for item in items]
     finally:
         db.close()
 
@@ -88,33 +161,42 @@ def get_items():
 @app.post("/api/items")
 async def create_item(item: ItemCreate):
     """新增剪贴板内容"""
-    if not item.content or not item.content.strip():
-        raise HTTPException(status_code=400, detail="内容不能为空")
-
     db = SessionLocal()
     try:
-        new_item = ClipboardItem(content=item.content.strip())
+        new_item = ClipboardItem(content=normalize_content(item.content))
         db.add(new_item)
         db.commit()
         db.refresh(new_item)
 
-        created_at_str = to_local_time(new_item.created_at)
+        payload = serialize_item(new_item)
+        stale_ids = prune_old_items(db)
 
-        # 广播新消息给所有客户端
-        await manager.broadcast({
-            "type": "create",
-            "data": {
-                "id": new_item.id,
-                "content": new_item.content,
-                "created_at": created_at_str
-            }
-        })
+        await manager.broadcast({"type": "create", "data": payload})
+        for stale_id in stale_ids:
+            await manager.broadcast({"type": "delete", "data": {"id": stale_id}})
 
-        return {
-            "id": new_item.id,
-            "content": new_item.content,
-            "created_at": created_at_str
-        }
+        return payload
+    finally:
+        db.close()
+
+
+@app.put("/api/items/{item_id}")
+async def update_item(item_id: int, item: ItemCreate):
+    """修改剪贴板内容"""
+    db = SessionLocal()
+    try:
+        existing_item = db.query(ClipboardItem).filter(ClipboardItem.id == item_id).first()
+        if not existing_item:
+            raise HTTPException(status_code=404, detail="内容不存在")
+
+        existing_item.content = normalize_content(item.content)
+        db.commit()
+        db.refresh(existing_item)
+
+        payload = serialize_item(existing_item)
+        await manager.broadcast({"type": "update", "data": payload})
+
+        return payload
     finally:
         db.close()
 

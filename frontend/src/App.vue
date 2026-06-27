@@ -1,68 +1,227 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { computed, h, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import {
+  NButton,
+  NConfigProvider,
+  NEmpty,
+  NIcon,
+  NMessageProvider,
+  NTag,
+  NTooltip,
+  createDiscreteApi,
+  darkTheme,
+} from 'naive-ui'
+import {
+  ChatbubbleEllipsesOutline,
+  CheckmarkCircleOutline,
+  MoonOutline,
+  RefreshOutline,
+  SunnyOutline,
+  WarningOutline,
+  WifiOutline,
+} from '@vicons/ionicons5'
 import ClipboardCard from './components/ClipboardCard.vue'
 import InputBox from './components/InputBox.vue'
 
 const API_URL = '/api'
+const ITEMS_PAGE_SIZE = 100
+const HEARTBEAT_INTERVAL_MS = 15000
+const HEARTBEAT_TIMEOUT_MS = 45000
 const WS_URL = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`
+const { message } = createDiscreteApi(['message'])
 
-// WebSocket 连接
 let ws = null
-let reconnectTimer = null
+let heartbeatTimer = null
+let lastSocketActivityAt = 0
+let shouldReconnect = true
 
-const connectWebSocket = () => {
-  ws = new WebSocket(WS_URL)
+const isDark = ref(false)
+const clipboardItems = ref([])
+const loading = ref(false)
+const errorMessage = ref('')
+const connectionState = ref('connecting')
 
-  ws.onopen = () => {
-    console.log('WebSocket 已连接')
+const naiveTheme = computed(() => (isDark.value ? darkTheme : null))
+const themeOverrides = {
+  common: {
+    primaryColor: '#2f6f4e',
+    primaryColorHover: '#285f43',
+    primaryColorPressed: '#224f39',
+    borderRadius: '6px',
+    fontWeightStrong: '650',
+  },
+}
+
+const connectionMeta = computed(() => {
+  const map = {
+    connected: {
+      label: '实时同步中',
+      type: 'success',
+      icon: CheckmarkCircleOutline,
+    },
+    connecting: {
+      label: '正在连接',
+      type: 'warning',
+      icon: WifiOutline,
+    },
+    reconnecting: {
+      label: '正在重连',
+      type: 'warning',
+      icon: WifiOutline,
+    },
+    disconnected: {
+      label: '连接已断开',
+      type: 'error',
+      icon: WarningOutline,
+    },
   }
+  return map[connectionState.value] || map.connecting
+})
 
-  ws.onmessage = (event) => {
-    try {
-      const message = JSON.parse(event.data)
-      handleWebSocketMessage(message)
-    } catch (err) {
-      // ping/pong 消息
-    }
+const isRefreshWorking = computed(() => (
+  loading.value ||
+  connectionState.value === 'connecting' ||
+  connectionState.value === 'reconnecting'
+))
+
+const refreshButtonClass = computed(() => ({
+  'refresh-status-button': true,
+  'is-ws-connected': connectionState.value === 'connected' && !loading.value,
+  'is-ws-disconnected': connectionState.value === 'disconnected',
+  'is-ws-reconnecting': isRefreshWorking.value,
+}))
+
+const refreshTooltip = computed(() => {
+  if (connectionState.value === 'disconnected') {
+    return 'WebSocket 已断开，点击刷新内容并重连'
   }
-
-  ws.onclose = () => {
-    console.log('WebSocket 已断开，尝试重连...')
-    reconnectTimer = setTimeout(connectWebSocket, 3000)
+  if (connectionState.value === 'connected') {
+    return loading.value ? '正在刷新内容' : 'WebSocket 连接正常，点击刷新内容'
   }
+  return '正在刷新内容并重连'
+})
 
-  ws.onerror = () => {
-    ws.close()
+const renderIcon = (icon) => () => h(NIcon, null, { default: () => h(icon) })
+
+const clearHeartbeatTimer = () => {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer)
+    heartbeatTimer = null
   }
 }
 
-const handleWebSocketMessage = (message) => {
-  if (message.type === 'create') {
-    // 新增消息，添加到列表末尾（最新消息在底部）
-    const newItem = {
-      ...message.data,
-      createdAt: new Date(message.data.created_at)
+const markWebSocketDisconnected = () => {
+  if (!shouldReconnect) return
+  clearHeartbeatTimer()
+  connectionState.value = 'disconnected'
+}
+
+const startHeartbeat = (socket) => {
+  clearHeartbeatTimer()
+  lastSocketActivityAt = Date.now()
+
+  heartbeatTimer = setInterval(() => {
+    if (ws !== socket) return
+    if (socket.readyState !== WebSocket.OPEN) {
+      markWebSocketDisconnected()
+      return
     }
-    clipboardItems.value.push(newItem)
-    // 滚动到底部
-    scrollToBottom()
-  } else if (message.type === 'delete') {
-    // 删除消息
-    clipboardItems.value = clipboardItems.value.filter(item => item.id !== message.data.id)
+
+    if (Date.now() - lastSocketActivityAt > HEARTBEAT_TIMEOUT_MS) {
+      markWebSocketDisconnected()
+      socket.close()
+      return
+    }
+
+    socket.send('ping')
+  }, HEARTBEAT_INTERVAL_MS)
+}
+
+const connectWebSocket = (options = {}) => {
+  const { state = 'connecting' } = options
+  clearHeartbeatTimer()
+
+  if (ws) {
+    ws.onopen = null
+    ws.onmessage = null
+    ws.onclose = null
+    ws.onerror = null
+    ws.close()
   }
+
+  connectionState.value = state
+  const socket = new WebSocket(WS_URL)
+  ws = socket
+
+  socket.onopen = () => {
+    if (ws !== socket) return
+    connectionState.value = 'connected'
+    startHeartbeat(socket)
+    fetchItems({ silent: true })
+  }
+
+  socket.onmessage = (event) => {
+    if (ws !== socket) return
+    lastSocketActivityAt = Date.now()
+    if (event.data === 'pong') return
+
+    try {
+      const socketMessage = JSON.parse(event.data)
+      handleWebSocketMessage(socketMessage)
+    } catch (err) {
+      // Non-JSON messages are heartbeat responses.
+    }
+  }
+
+  socket.onclose = () => {
+    if (ws !== socket) return
+    markWebSocketDisconnected()
+  }
+
+  socket.onerror = () => {
+    if (ws !== socket) return
+    markWebSocketDisconnected()
+    socket.close()
+  }
+}
+
+const handleWebSocketMessage = (socketMessage) => {
+  if (socketMessage.type === 'create') {
+    const newItem = normalizeItem(socketMessage.data)
+    const exists = clipboardItems.value.some(item => item.id === newItem.id)
+    if (!exists) {
+      clipboardItems.value.push(newItem)
+      scrollToBottom()
+    }
+  } else if (socketMessage.type === 'update') {
+    const updatedItem = normalizeItem(socketMessage.data)
+    const index = clipboardItems.value.findIndex(item => item.id === updatedItem.id)
+    if (index !== -1) {
+      clipboardItems.value[index] = updatedItem
+    }
+  } else if (socketMessage.type === 'delete') {
+    clipboardItems.value = clipboardItems.value.filter(item => item.id !== socketMessage.data.id)
+  }
+}
+
+const normalizeItem = (item) => ({
+  ...item,
+  createdAt: new Date(item.created_at),
+})
+
+const getResponseError = async (res) => {
+  const body = await res.json().catch(() => ({}))
+  return new Error(body.detail || `HTTP ${res.status}`)
 }
 
 const scrollToBottom = () => {
   nextTick(() => {
     window.scrollTo({
-      top: document.body.scrollHeight,
-      behavior: 'smooth'
+      top: document.documentElement.scrollHeight,
+      behavior: 'smooth',
     })
   })
 }
-
-// 主题切换
-const isDark = ref(false)
 
 const toggleTheme = () => {
   isDark.value = !isDark.value
@@ -70,160 +229,234 @@ const toggleTheme = () => {
   localStorage.setItem('theme', isDark.value ? 'dark' : 'light')
 }
 
-// 初始化主题
-onMounted(() => {
+const initializeTheme = () => {
   const savedTheme = localStorage.getItem('theme')
-  if (savedTheme === 'dark' || (!savedTheme && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
-    isDark.value = true
-    document.documentElement.classList.add('dark')
-  }
-  // 加载数据
-  fetchItems()
-  // 连接 WebSocket
-  connectWebSocket()
-})
+  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
+  isDark.value = savedTheme === 'dark' || (!savedTheme && prefersDark)
+  document.documentElement.classList.toggle('dark', isDark.value)
+}
 
-onUnmounted(() => {
-  if (ws) ws.close()
-  if (reconnectTimer) clearTimeout(reconnectTimer)
-})
+const fetchItems = async (options = {}) => {
+  const { silent = false } = options
+  if (!silent) loading.value = true
+  errorMessage.value = ''
 
-// 剪贴板数据
-const clipboardItems = ref([])
-
-// 获取数据
-const fetchItems = async () => {
   try {
-    const res = await fetch(`${API_URL}/items`)
+    const res = await fetch(`${API_URL}/items?limit=${ITEMS_PAGE_SIZE}&offset=0`)
+    if (!res.ok) throw await getResponseError(res)
     const data = await res.json()
-    // 反转数组，最新消息显示在底部
-    clipboardItems.value = data.reverse().map(item => ({
-      ...item,
-      createdAt: new Date(item.created_at)
-    }))
-    // 滚动到最新消息
+    clipboardItems.value = data.reverse().map(normalizeItem)
     scrollToBottom()
   } catch (err) {
+    errorMessage.value = '无法加载剪贴板内容，请检查后端服务。'
+    if (!silent) message.error(errorMessage.value)
     console.error('获取数据失败:', err)
+  } finally {
+    loading.value = false
   }
 }
 
-// 添加新内容
+const handleRefreshClick = async () => {
+  if (isRefreshWorking.value) return
+
+  const needsReconnect = connectionState.value !== 'connected' || ws?.readyState !== WebSocket.OPEN
+  if (needsReconnect) {
+    connectionState.value = 'reconnecting'
+  }
+
+  await fetchItems()
+
+  if (needsReconnect && shouldReconnect) {
+    connectWebSocket({ state: 'reconnecting' })
+  }
+}
+
 const addContent = async (content) => {
   if (!content.trim()) return
+
   try {
-    await fetch(`${API_URL}/items`, {
+    const res = await fetch(`${API_URL}/items`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content: content.trim() })
+      body: JSON.stringify({ content: content.trim() }),
     })
-    // WebSocket 会推送更新，无需手动刷新
+    if (!res.ok) throw await getResponseError(res)
+
+    const savedItem = normalizeItem(await res.json())
+    const exists = clipboardItems.value.some(item => item.id === savedItem.id)
+    if (!exists) {
+      clipboardItems.value.push(savedItem)
+      scrollToBottom()
+    }
   } catch (err) {
+    message.error(err.message || '发送失败，请稍后重试')
     console.error('添加失败:', err)
   }
 }
 
-// 删除内容
+const updateItem = async ({ id, content }) => {
+  if (!content.trim()) return
+
+  try {
+    const res = await fetch(`${API_URL}/items/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: content.trim() }),
+    })
+    if (!res.ok) throw await getResponseError(res)
+
+    const updatedItem = normalizeItem(await res.json())
+    const index = clipboardItems.value.findIndex(item => item.id === updatedItem.id)
+    if (index !== -1) {
+      clipboardItems.value[index] = updatedItem
+    }
+    message.success('已修改')
+  } catch (err) {
+    message.error(err.message || '修改失败，请稍后重试')
+    console.error('修改失败:', err)
+  }
+}
+
 const deleteItem = async (id) => {
   try {
-    await fetch(`${API_URL}/items/${id}`, { method: 'DELETE' })
-    // WebSocket 会推送更新，无需手动更新
+    const res = await fetch(`${API_URL}/items/${id}`, { method: 'DELETE' })
+    if (!res.ok) throw await getResponseError(res)
+    clipboardItems.value = clipboardItems.value.filter(item => item.id !== id)
+    message.success('已删除')
   } catch (err) {
+    message.error('删除失败，请稍后重试')
     console.error('删除失败:', err)
   }
 }
 
-// 时间分组（5分钟阈值）
 const groupedItems = computed(() => {
   const groups = []
-  const threshold = 5 * 60 * 1000 // 5分钟
+  const threshold = 5 * 60 * 1000
 
   clipboardItems.value.forEach((item, index) => {
     const prevItem = clipboardItems.value[index - 1]
-    // 当前数据是旧->新顺序，比较当前消息与前一条（更旧的）消息的时间差
     const timeDiff = prevItem ? item.createdAt - prevItem.createdAt : Infinity
 
     if (timeDiff > threshold) {
       groups.push({
         isTimeSeparator: true,
         time: item.createdAt,
-        id: `time-${item.id}`
+        id: `time-${item.id}`,
       })
     }
     groups.push({
       ...item,
-      isTimeSeparator: false
+      isTimeSeparator: false,
     })
   })
 
   return groups
 })
+
+onMounted(() => {
+  initializeTheme()
+  fetchItems()
+  connectWebSocket()
+})
+
+onUnmounted(() => {
+  shouldReconnect = false
+  if (ws) ws.close()
+  clearHeartbeatTimer()
+})
 </script>
 
 <template>
-  <div class="min-h-screen bg-[#EDEDED] dark:bg-[#111111] transition-colors duration-300">
-    <!-- 头部 -->
-    <header class="sticky top-0 z-10 bg-[#EDEDED] dark:bg-[#111111] border-b border-[#E5E5E5] dark:border-[#2A2A2A]">
-      <div class="max-w-2xl mx-auto px-4 py-4 flex items-center justify-between">
-        <div class="flex items-center gap-3">
-          <!-- GitHub 图标 -->
-          <a
-            href="https://github.com/coco-ari/CopyHub"
-            target="_blank"
-            :title="`⭐ Star on GitHub`"
-            class="w-9 h-9 rounded-full bg-white dark:bg-[#2A2A2A] flex items-center justify-center hover:bg-[#F5F5F5] dark:hover:bg-[#3A3A3A] transition-colors"
-          >
-            <svg class="w-5 h-5 text-[#191919] dark:text-[#E5E5E5]" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.17 6.839 9.49.5.092.682-.217.682-.482 0-.237-.008-.866-.013-1.7-2.782.604-3.369-1.34-3.369-1.34-.454-1.156-1.11-1.464-1.11-1.464-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.831.092-.646.35-1.086.636-1.336-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0112 6.836c.85.004 1.705.115 2.504.337 1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.743 0 .267.18.578.688.48C19.138 20.167 22 16.418 22 12c0-5.523-4.477-10-10-10z"/>
-            </svg>
-          </a>
-          <h1 class="text-xl font-semibold text-[#191919] dark:text-[#E5E5E5] flex items-center gap-3">
-            <!-- Logo 图标 - CH 透明背景 -->
-            <span class="text-[#07C160] font-bold text-lg tracking-tight">
-              CH
-            </span>
-            CopyHub
-          </h1>
-        </div>
-        <button
-          @click="toggleTheme"
-          class="w-10 h-10 rounded-full bg-white dark:bg-[#2A2A2A] flex items-center justify-center hover:bg-gray-100 dark:hover:bg-[#3A3A3A] transition-colors"
-          :title="isDark ? '切换到浅色模式' : '切换到深色模式'"
-        >
-          <!-- 太阳图标 (深色模式显示) -->
-          <svg v-if="isDark" class="w-5 h-5 text-[#E5E5E5]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <circle cx="12" cy="12" r="5" stroke-width="2"/>
-            <path stroke-width="2" stroke-linecap="round" d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
-          </svg>
-          <!-- 月亮图标 (浅色模式显示) -->
-          <svg v-else class="w-5 h-5 text-[#191919]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/>
-          </svg>
-        </button>
-      </div>
-    </header>
+  <n-config-provider :theme="naiveTheme" :theme-overrides="themeOverrides">
+    <n-message-provider>
+      <div class="notion-shell">
+        <header class="notion-topbar">
+          <div class="notion-topbar__inner">
+            <div class="brand-block">
+              <div class="brand-mark">CH</div>
+              <div>
+                <h1>CopyHub</h1>
+                <p>Shared clipboard</p>
+              </div>
+            </div>
 
-    <!-- 主内容区 -->
-    <main class="max-w-2xl mx-auto px-4 py-4 pb-32">
-      <div class="space-y-3">
-        <template v-for="item in groupedItems" :key="item.id">
-          <!-- 时间分隔 -->
-          <div v-if="item.isTimeSeparator" class="text-center py-3">
-            <span class="text-xs text-[#888888] bg-[#D8D8D8] dark:bg-[#2A2A2A] px-3 py-1 rounded-sm">
-              {{ $formatTime(item.time) }}
-            </span>
+            <div class="topbar-actions">
+              <n-tag
+                class="connection-tag"
+                :type="connectionMeta.type"
+                round
+                :bordered="false"
+              >
+                <template #icon>
+                  <n-icon><component :is="connectionMeta.icon" /></n-icon>
+                </template>
+                {{ connectionMeta.label }}
+              </n-tag>
+              <n-tooltip trigger="hover">
+                <template #trigger>
+                  <n-button
+                    circle
+                    secondary
+                    :class="refreshButtonClass"
+                    :render-icon="renderIcon(RefreshOutline)"
+                    :aria-label="refreshTooltip"
+                    @click="handleRefreshClick"
+                  />
+                </template>
+                {{ refreshTooltip }}
+              </n-tooltip>
+              <n-tooltip trigger="hover">
+                <template #trigger>
+                  <n-button
+                    circle
+                    secondary
+                    :render-icon="renderIcon(isDark ? SunnyOutline : MoonOutline)"
+                    @click="toggleTheme"
+                  />
+                </template>
+                {{ isDark ? '切换到浅色模式' : '切换到深色模式' }}
+              </n-tooltip>
+            </div>
           </div>
-          <!-- 剪贴板卡片 -->
-          <ClipboardCard
-            v-else
-            :content="item.content"
-            @delete="deleteItem(item.id)"
-          />
-        </template>
-      </div>
-    </main>
+        </header>
 
-    <!-- 底部输入框 -->
-    <InputBox @submit="addContent" />
-  </div>
+        <main class="notion-page">
+          <section class="page-title">
+            <div class="page-icon">
+              <n-icon><ChatbubbleEllipsesOutline /></n-icon>
+            </div>
+            <h2>Clipboard</h2>
+          </section>
+
+          <div v-if="errorMessage" class="inline-alert">
+            {{ errorMessage }}
+          </div>
+
+          <section class="document-stream" :class="{ 'is-loading': loading }">
+            <n-empty
+              v-if="!loading && groupedItems.length === 0"
+              description="还没有剪贴板内容"
+            />
+
+            <div v-else class="block-list">
+              <template v-for="item in groupedItems" :key="item.id">
+                <div v-if="item.isTimeSeparator" class="time-separator">
+                  <span>{{ $formatTime(item.time) }}</span>
+                </div>
+                <ClipboardCard
+                  v-else
+                  :id="item.id"
+                  :content="item.content"
+                  @delete="deleteItem(item.id)"
+                  @update="updateItem"
+                />
+              </template>
+            </div>
+          </section>
+        </main>
+
+        <InputBox @submit="addContent" />
+      </div>
+    </n-message-provider>
+  </n-config-provider>
 </template>
