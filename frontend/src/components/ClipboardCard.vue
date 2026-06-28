@@ -4,6 +4,8 @@ import { NButton, NIcon, NInput, NSpace, NTooltip, createDiscreteApi } from 'nai
 import {
   CheckmarkOutline,
   CopyOutline,
+  Star,
+  StarOutline,
   CreateOutline,
   TrashOutline,
 } from '@vicons/ionicons5'
@@ -17,9 +19,13 @@ const props = defineProps({
     type: String,
     required: true,
   },
+  isFavorite: {
+    type: Boolean,
+    default: false,
+  },
 })
 
-const emit = defineEmits(['delete', 'update'])
+const emit = defineEmits(['delete', 'update', 'toggle-favorite'])
 const { message, dialog } = createDiscreteApi(['message', 'dialog'])
 const copied = ref(false)
 const editing = ref(false)
@@ -95,7 +101,7 @@ const confirmDelete = () => {
 </script>
 
 <template>
-  <article class="notion-block" :class="{ 'is-editing': editing }">
+  <article class="notion-block" :class="{ 'is-editing': editing, 'is-favorite': isFavorite }">
     <div v-if="editing" class="block-editor">
       <n-input
         ref="editInputRef"
@@ -133,6 +139,20 @@ const confirmDelete = () => {
             />
           </template>
           {{ copied ? '已复制' : '复制内容' }}
+        </n-tooltip>
+        <n-tooltip trigger="hover">
+          <template #trigger>
+            <n-button
+              quaternary
+              circle
+              size="small"
+              :class="{ 'favorite-action': true, 'is-active': isFavorite }"
+              :type="isFavorite ? 'warning' : 'default'"
+              :render-icon="renderIcon(isFavorite ? Star : StarOutline)"
+              @click="emit('toggle-favorite', { id: props.id, isFavorite: !isFavorite })"
+            />
+          </template>
+          {{ isFavorite ? '取消收藏' : '收藏' }}
         </n-tooltip>
         <n-tooltip trigger="hover">
           <template #trigger>

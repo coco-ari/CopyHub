@@ -16,6 +16,8 @@ import {
   CheckmarkCircleOutline,
   MoonOutline,
   RefreshOutline,
+  Star,
+  StarOutline,
   SunnyOutline,
   WarningOutline,
   WifiOutline,
@@ -40,6 +42,7 @@ const clipboardItems = ref([])
 const loading = ref(false)
 const errorMessage = ref('')
 const connectionState = ref('connecting')
+const showFavorites = ref(false)
 
 const naiveTheme = computed(() => (isDark.value ? darkTheme : null))
 const themeOverrides = {
@@ -90,6 +93,15 @@ const refreshButtonClass = computed(() => ({
   'is-ws-disconnected': connectionState.value === 'disconnected',
   'is-ws-reconnecting': isRefreshWorking.value,
 }))
+
+const favoritesButtonClass = computed(() => ({
+  'favorites-filter-button': true,
+  'is-active': showFavorites.value,
+}))
+
+const favoritesTooltip = computed(() => (
+  showFavorites.value ? '正在查看收藏，点击返回全部' : '查看收藏内容'
+))
 
 const refreshTooltip = computed(() => {
   if (connectionState.value === 'disconnected') {
@@ -206,7 +218,9 @@ const handleWebSocketMessage = (socketMessage) => {
 
 const normalizeItem = (item) => ({
   ...item,
+  is_favorite: Boolean(item.is_favorite),
   createdAt: new Date(item.created_at),
+  favoritedAt: item.favorited_at ? new Date(item.favorited_at) : null,
 })
 
 const getResponseError = async (res) => {
@@ -218,6 +232,15 @@ const scrollToBottom = () => {
   nextTick(() => {
     window.scrollTo({
       top: document.documentElement.scrollHeight,
+      behavior: 'smooth',
+    })
+  })
+}
+
+const scrollToTop = () => {
+  nextTick(() => {
+    window.scrollTo({
+      top: 0,
       behavior: 'smooth',
     })
   })
@@ -237,16 +260,22 @@ const initializeTheme = () => {
 }
 
 const fetchItems = async (options = {}) => {
-  const { silent = false } = options
+  const { silent = false, favorites = showFavorites.value } = options
   if (!silent) loading.value = true
   errorMessage.value = ''
 
   try {
-    const res = await fetch(`${API_URL}/items?limit=${ITEMS_PAGE_SIZE}&offset=0`)
+    const favoriteQuery = favorites ? '&favorites=true' : ''
+    const res = await fetch(API_URL + '/items?limit=' + ITEMS_PAGE_SIZE + '&offset=0' + favoriteQuery)
     if (!res.ok) throw await getResponseError(res)
     const data = await res.json()
-    clipboardItems.value = data.reverse().map(normalizeItem)
-    scrollToBottom()
+    const orderedData = favorites ? data : data.reverse()
+    clipboardItems.value = orderedData.map(normalizeItem)
+    if (favorites) {
+      scrollToTop()
+    } else {
+      scrollToBottom()
+    }
   } catch (err) {
     errorMessage.value = '无法加载剪贴板内容，请检查后端服务。'
     if (!silent) message.error(errorMessage.value)
@@ -254,6 +283,11 @@ const fetchItems = async (options = {}) => {
   } finally {
     loading.value = false
   }
+}
+
+const toggleFavoritesView = async () => {
+  showFavorites.value = !showFavorites.value
+  await fetchItems({ favorites: showFavorites.value })
 }
 
 const handleRefreshClick = async () => {
@@ -283,6 +317,11 @@ const addContent = async (content) => {
     if (!res.ok) throw await getResponseError(res)
 
     const savedItem = normalizeItem(await res.json())
+    const wasViewingFavorites = showFavorites.value
+    showFavorites.value = false
+    if (wasViewingFavorites) {
+      await fetchItems({ silent: true, favorites: false })
+    }
     const exists = clipboardItems.value.some(item => item.id === savedItem.id)
     if (!exists) {
       clipboardItems.value.push(savedItem)
@@ -317,6 +356,38 @@ const updateItem = async ({ id, content }) => {
   }
 }
 
+const toggleFavorite = async ({ id, isFavorite }) => {
+  const index = clipboardItems.value.findIndex(item => item.id === id)
+  if (index === -1) return
+
+  const previousItem = { ...clipboardItems.value[index] }
+  clipboardItems.value[index] = {
+    ...clipboardItems.value[index],
+    is_favorite: isFavorite,
+    favoritedAt: isFavorite ? new Date() : null,
+  }
+
+  try {
+    const res = await fetch(API_URL + "/items/" + id + "/favorite", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ is_favorite: isFavorite }),
+    })
+    if (!res.ok) throw await getResponseError(res)
+
+    const updatedItem = normalizeItem(await res.json())
+    const nextIndex = clipboardItems.value.findIndex(item => item.id === updatedItem.id)
+    if (nextIndex !== -1) {
+      clipboardItems.value[nextIndex] = updatedItem
+    }
+  } catch (err) {
+    clipboardItems.value[index] = previousItem
+    message.error(err.message || "收藏状态更新失败")
+    console.error("收藏失败:", err)
+  }
+}
+
+
 const deleteItem = async (id) => {
   try {
     const res = await fetch(`${API_URL}/items/${id}`, { method: 'DELETE' })
@@ -329,19 +400,38 @@ const deleteItem = async (id) => {
   }
 }
 
+const visibleItems = computed(() => {
+  if (!showFavorites.value) return clipboardItems.value
+
+  return clipboardItems.value
+    .filter(item => item.is_favorite)
+    .slice()
+    .sort((a, b) => {
+      const aTime = a.favoritedAt?.getTime?.() || 0
+      const bTime = b.favoritedAt?.getTime?.() || 0
+      return bTime - aTime
+    })
+})
+
+const getGroupTime = (item) => (
+  showFavorites.value && item.favoritedAt ? item.favoritedAt : item.createdAt
+)
+
 const groupedItems = computed(() => {
   const groups = []
   const threshold = 5 * 60 * 1000
 
-  clipboardItems.value.forEach((item, index) => {
-    const prevItem = clipboardItems.value[index - 1]
-    const timeDiff = prevItem ? item.createdAt - prevItem.createdAt : Infinity
+  visibleItems.value.forEach((item, index) => {
+    const prevItem = visibleItems.value[index - 1]
+    const itemTime = getGroupTime(item)
+    const prevTime = prevItem ? getGroupTime(prevItem) : null
+    const timeDiff = prevTime ? Math.abs(itemTime - prevTime) : Infinity
 
     if (timeDiff > threshold) {
       groups.push({
         isTimeSeparator: true,
-        time: item.createdAt,
-        id: `time-${item.id}`,
+        time: itemTime,
+        id: "time-" + item.id,
       })
     }
     groups.push({
@@ -352,7 +442,6 @@ const groupedItems = computed(() => {
 
   return groups
 })
-
 onMounted(() => {
   initializeTheme()
   fetchItems()
@@ -410,6 +499,20 @@ onUnmounted(() => {
                   <n-button
                     circle
                     secondary
+                    :class="favoritesButtonClass"
+                    :render-icon="renderIcon(showFavorites ? Star : StarOutline)"
+                    :aria-label="favoritesTooltip"
+                    @click="toggleFavoritesView"
+                  />
+                </template>
+                {{ favoritesTooltip }}
+              </n-tooltip>
+
+              <n-tooltip trigger="hover">
+                <template #trigger>
+                  <n-button
+                    circle
+                    secondary
                     :render-icon="renderIcon(isDark ? SunnyOutline : MoonOutline)"
                     @click="toggleTheme"
                   />
@@ -435,7 +538,7 @@ onUnmounted(() => {
           <section class="document-stream" :class="{ 'is-loading': loading }">
             <n-empty
               v-if="!loading && groupedItems.length === 0"
-              description="还没有剪贴板内容"
+              :description="showFavorites ? '还没有收藏内容' : '还没有剪贴板内容'"
             />
 
             <div v-else class="block-list">
@@ -447,8 +550,10 @@ onUnmounted(() => {
                   v-else
                   :id="item.id"
                   :content="item.content"
+                  :is-favorite="item.is_favorite"
                   @delete="deleteItem(item.id)"
                   @update="updateItem"
+                  @toggle-favorite="toggleFavorite"
                 />
               </template>
             </div>

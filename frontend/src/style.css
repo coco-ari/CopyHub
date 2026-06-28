@@ -163,6 +163,36 @@ textarea {
 .refresh-status-button.is-ws-reconnecting .n-icon {
   animation: copyhub-refresh-spin 900ms linear infinite;
 }
+.favorites-filter-button {
+  transition: color 160ms ease, background-color 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.favorites-filter-button.is-active {
+  --n-color: #f6c343;
+  --n-color-hover: #f3b72d;
+  --n-color-pressed: #dea112;
+  --n-text-color: #3b2a05;
+  --n-text-color-hover: #2f2103;
+  --n-text-color-pressed: #241902;
+  --n-border: 1px solid #b97705;
+  --n-border-hover: 1px solid #955f04;
+  --n-border-pressed: 1px solid #7c4d03;
+  box-shadow: 0 0 0 3px rgba(217, 119, 6, 0.22), 0 6px 16px rgba(146, 91, 9, 0.22);
+}
+
+:root.dark .favorites-filter-button.is-active {
+  --n-color: #facc15;
+  --n-color-hover: #fde047;
+  --n-color-pressed: #eab308;
+  --n-text-color: #1f1600;
+  --n-text-color-hover: #1f1600;
+  --n-text-color-pressed: #1f1600;
+  --n-border: 1px solid #fef08a;
+  --n-border-hover: 1px solid #fde047;
+  --n-border-pressed: 1px solid #eab308;
+  box-shadow: 0 0 0 3px rgba(250, 204, 21, 0.22), 0 6px 16px rgba(250, 204, 21, 0.16);
+}
+
 
 @keyframes copyhub-refresh-spin {
   to {
@@ -257,7 +287,7 @@ textarea {
   grid-template-columns: 24px minmax(0, 1fr);
   gap: 6px;
   align-items: start;
-  padding: 8px 92px 8px 2px;
+  padding: 8px 126px 8px 2px;
 }
 
 .block-handle {
@@ -294,9 +324,30 @@ textarea {
 }
 
 .notion-block:hover .block-actions,
-.block-actions:focus-within {
+.block-actions:focus-within,
+.notion-block.is-favorite .block-actions {
   opacity: 1;
 }
+
+.notion-block.is-favorite:not(:hover) .block-actions .n-button:not(.favorite-action) {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.favorite-action.is-active {
+  --n-color-hover: rgba(246, 195, 67, 0.2);
+  --n-color-pressed: rgba(246, 195, 67, 0.28);
+  --n-text-color: #b45309;
+  --n-text-color-hover: #92400e;
+  --n-text-color-pressed: #78350f;
+}
+
+:root.dark .favorite-action.is-active {
+  --n-text-color: #facc15;
+  --n-text-color-hover: #fde047;
+  --n-text-color-pressed: #eab308;
+}
+
 
 .block-editor {
   display: grid;
@@ -369,7 +420,7 @@ textarea {
 
   .block-content {
     grid-template-columns: minmax(0, 1fr);
-    padding: 8px 98px 8px 8px;
+    padding: 8px 132px 8px 8px;
   }
 
   .block-handle {

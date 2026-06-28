@@ -12,8 +12,26 @@ TZ_SHANGHAI = timezone(timedelta(hours=8))
 from database import SessionLocal, engine, Base
 from models import ClipboardItem
 
+
+def ensure_schema():
+    Base.metadata.create_all(bind=engine)
+    if engine.dialect.name != "sqlite":
+        return
+
+    with engine.begin() as connection:
+        columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(clipboard_items)")}
+        if "is_favorite" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE clipboard_items ADD COLUMN is_favorite BOOLEAN NOT NULL DEFAULT 0"
+            )
+        if "favorited_at" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE clipboard_items ADD COLUMN favorited_at DATETIME"
+            )
+
+
 # 创建数据库表
-Base.metadata.create_all(bind=engine)
+ensure_schema()
 
 app = FastAPI(title="CopyHub API", version="1.0.0")
 
@@ -75,6 +93,10 @@ class ItemCreate(BaseModel):
     content: str
 
 
+class FavoriteUpdate(BaseModel):
+    is_favorite: bool
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket 连接端点"""
@@ -101,6 +123,8 @@ def serialize_item(item: ClipboardItem) -> dict:
         "id": item.id,
         "content": item.content,
         "created_at": to_local_time(item.created_at),
+        "is_favorite": bool(item.is_favorite),
+        "favorited_at": to_local_time(item.favorited_at) if item.favorited_at else None,
     }
 
 
@@ -124,6 +148,7 @@ def prune_old_items(db) -> list[int]:
 
     stale_items = (
         db.query(ClipboardItem.id)
+        .filter(ClipboardItem.is_favorite.is_(False))
         .order_by(ClipboardItem.created_at.desc(), ClipboardItem.id.desc())
         .offset(RETENTION_ITEMS)
         .all()
@@ -142,17 +167,22 @@ def prune_old_items(db) -> list[int]:
 def get_items(
     limit: int = Query(DEFAULT_ITEMS_LIMIT, ge=1, le=MAX_ITEMS_LIMIT),
     offset: int = Query(0, ge=0),
+    favorites: bool = Query(False),
 ):
-    """获取剪贴板内容，按时间倒序分页"""
+    """获取剪贴板内容，按时间倒序分页；收藏视图按收藏时间倒序。"""
     db = SessionLocal()
     try:
-        items = (
-            db.query(ClipboardItem)
-            .order_by(ClipboardItem.created_at.desc(), ClipboardItem.id.desc())
-            .offset(offset)
-            .limit(limit)
-            .all()
-        )
+        query = db.query(ClipboardItem)
+        if favorites:
+            query = query.filter(ClipboardItem.is_favorite.is_(True)).order_by(
+                ClipboardItem.favorited_at.desc(),
+                ClipboardItem.created_at.desc(),
+                ClipboardItem.id.desc(),
+            )
+        else:
+            query = query.order_by(ClipboardItem.created_at.desc(), ClipboardItem.id.desc())
+
+        items = query.offset(offset).limit(limit).all()
         return [serialize_item(item) for item in items]
     finally:
         db.close()
@@ -190,6 +220,28 @@ async def update_item(item_id: int, item: ItemCreate):
             raise HTTPException(status_code=404, detail="内容不存在")
 
         existing_item.content = normalize_content(item.content)
+        db.commit()
+        db.refresh(existing_item)
+
+        payload = serialize_item(existing_item)
+        await manager.broadcast({"type": "update", "data": payload})
+
+        return payload
+    finally:
+        db.close()
+
+
+@app.patch("/api/items/{item_id}/favorite")
+async def update_favorite(item_id: int, favorite: FavoriteUpdate):
+    """切换收藏状态"""
+    db = SessionLocal()
+    try:
+        existing_item = db.query(ClipboardItem).filter(ClipboardItem.id == item_id).first()
+        if not existing_item:
+            raise HTTPException(status_code=404, detail="内容不存在")
+
+        existing_item.is_favorite = favorite.is_favorite
+        existing_item.favorited_at = datetime.now() if favorite.is_favorite else None
         db.commit()
         db.refresh(existing_item)
 
