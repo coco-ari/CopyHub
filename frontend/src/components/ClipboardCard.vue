@@ -1,8 +1,10 @@
 <script setup>
-import { computed, h, nextTick, ref } from 'vue'
+import { computed, h, nextTick, ref, watch } from 'vue'
 import { NButton, NIcon, NInput, NSpace, NTooltip, createDiscreteApi } from 'naive-ui'
 import {
   CheckmarkOutline,
+  ChevronDownOutline,
+  ChevronUpOutline,
   CopyOutline,
   Star,
   StarOutline,
@@ -29,11 +31,25 @@ const emit = defineEmits(['delete', 'update', 'toggle-favorite'])
 const { message, dialog } = createDiscreteApi(['message', 'dialog'])
 const copied = ref(false)
 const editing = ref(false)
+const expanded = ref(false)
 const draftContent = ref('')
 const editInputRef = ref(null)
 
+const COLLAPSED_CHAR_LIMIT = 240
+const COLLAPSED_LINE_LIMIT = 6
+
 const renderIcon = (icon) => () => h(NIcon, null, { default: () => h(icon) })
 const blockPreview = computed(() => props.content.trim() || '空内容')
+const contentLineCount = computed(() => blockPreview.value.split(/\r\n|\r|\n/).length)
+const isLongContent = computed(() => (
+  blockPreview.value.length > COLLAPSED_CHAR_LIMIT ||
+  contentLineCount.value > COLLAPSED_LINE_LIMIT
+))
+const shouldCollapseContent = computed(() => isLongContent.value && !expanded.value)
+
+watch(() => props.content, () => {
+  expanded.value = false
+})
 
 const copyToClipboard = async () => {
   try {
@@ -121,9 +137,26 @@ const confirmDelete = () => {
     </div>
 
     <template v-else>
-      <div class="block-content">
+      <div
+        class="block-content"
+        :class="{ 'is-collapsed': shouldCollapseContent, 'is-expandable': isLongContent }"
+      >
         <span class="block-handle" aria-hidden="true">⋮⋮</span>
-        <p>{{ blockPreview }}</p>
+        <div class="block-body">
+          <p class="block-text">{{ blockPreview }}</p>
+          <div v-if="isLongContent" class="block-expand-row">
+            <n-button
+              text
+              size="tiny"
+              class="block-expand-button"
+              :aria-expanded="expanded"
+              :render-icon="renderIcon(expanded ? ChevronUpOutline : ChevronDownOutline)"
+              @click="expanded = !expanded"
+            >
+              {{ expanded ? '收起' : '展开全文' }}
+            </n-button>
+          </div>
+        </div>
       </div>
 
       <div class="block-actions">

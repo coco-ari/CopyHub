@@ -303,13 +303,51 @@ textarea {
   opacity: 1;
 }
 
-.block-content p {
+.block-body {
+  min-width: 0;
+}
+
+.block-text {
+  position: relative;
   margin: 0;
   color: var(--text-main);
   font-size: 15px;
   line-height: 1.72;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.block-content.is-collapsed .block-text {
+  max-height: calc(1.72em * 6);
+  overflow: hidden;
+}
+
+.block-content.is-collapsed .block-text::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2.8em;
+  pointer-events: none;
+  background: linear-gradient(to bottom, transparent, var(--page-bg));
+}
+
+.notion-block:hover .block-content.is-collapsed .block-text::after,
+.notion-block.is-editing .block-content.is-collapsed .block-text::after {
+  background: linear-gradient(to bottom, transparent, var(--surface-hover));
+}
+
+.block-expand-row {
+  display: flex;
+  margin-top: 4px;
+}
+
+.block-expand-button {
+  --n-text-color: var(--text-muted);
+  --n-text-color-hover: var(--accent);
+  --n-text-color-pressed: var(--accent);
+  font-weight: 600;
 }
 
 .block-actions {
